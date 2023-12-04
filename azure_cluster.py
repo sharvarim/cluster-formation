@@ -543,9 +543,10 @@ def main(clip, password):
     if cluster_ip and cluster_ip == clip:
         logger.info(f"Node is already part of cluster")
         return
-    nsip,mgmt_netmask = node.get_ip("NSIP")
-    vip, client_netmask = node.get_ip("VIP")
-    snip, server_netmask = node.get_ip("SNIP")
+    while not nsip or not vip or not snip:
+        nsip, mgmt_netmask = node.get_ip("NSIP")
+        vip, client_netmask = node.get_ip("VIP")
+        snip, server_netmask = node.get_ip("SNIP")
     mgmt_snip = get_mgmt_snip()
     
     cluster = Cluster(clip, password, nameserver="168.63.129.16", vip_netmask=client_netmask, mgmt_netmask=mgmt_netmask, server_netmask=server_netmask, backplane="0/1")
