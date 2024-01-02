@@ -101,35 +101,7 @@ class HTTPNitro:
 
     def do_request(self, resource, method, id=None, action=None, data=None, retries=3, headers=None):
         url = self.construct_url(resource, id, action)
-        data_dump = copy.deepcopy(data)
-        if data_dump: 
-            self.hide_sensitive_data(data_dump)
-        logger.debug(f"do_request method={method}  url={url}  data={data_dump}  retries={retries}")
-        error = ""
-        for attempt in range(retries+1):
-            if attempt:
-                waitfor(seconds=pow(2,attempt), reason="Waiting before retrying http request")
-            try:
-                response = requests.request(method, url=url, json=data, headers=headers, timeout=self.timeout)
-                logger.debug(f"response status={response.status_code}  text={response.text} attempt={attempt}")
-                if response.ok:
-                    if not response.text:
-                        return None
-                    try:
-                        result = json.loads(response.text)
-                        return result
-                    except json.decoder.JSONDecodeError:
-                        logger.error(f"do_request method={method}  url={url}  data={data_dump} response={response.text} attempt={attempt} failed. Reason: JSONDecodeError")
-                        error = "JSONDecodeError"
-                        pass
-                else:
-                    logger.error(f"do_request method={method}  url={url}  data={data_dump} response={response.text} status={response.status_code} attempt={attempt} failed.")
-                    error = response.text
-            except Exception as e:
-                logger.error(f"do_request method={method}  url={url}  data={data_dump} attempt={attempt} failed. Reason: {str(e)}")
-                error = str(e)
-                pass
-        raise ValueError(f"request url={url} method={method} failed. Reason: {error}")
+        return do_request(url, method, data, retries, headers, self.timeout)
 
     def change_default_password(self, new_pass):
         logger.info("Changing the default password")
@@ -146,12 +118,12 @@ class HTTPNitro:
         self.headers["X-NITRO-PASS"] = self.nspass
         logger.info("Successfully changed default password")
 
-    def check_connection(self):
+    def check_connection(self, retries=0):
         logger.info(f"Checking connection to {self.nsip}")
         headers = {"Content-Type": "application/json"}
         payload = {"login": {"username": self.nsuser, "password": self.nspass}}
         try:
-            self.do_request(resource="login", method="POST", data=payload, headers=headers, retries=0)
+            self.do_request(resource="login", method="POST", data=payload, headers=headers, retries=retries)
             logger.info(f"Connection to {self.nsip} successful")
             return True
         except Exception as e:
@@ -199,33 +171,6 @@ class CitrixADC(HTTPNitro):
     def __init__(self, nsip, nsuser="nsroot", nspass="nsroot"):
         super().__init__(nsip=nsip, nsuser=nsuser, nspass=nspass)
         
-    def get_ip(self, ip_type):
-        logger.info(f"Trying to get the IP of type {ip_type} on the node {self.nsip}")
-        try:
-            result = self.do_get(resource=f"nsip?filter=type:{ip_type}")
-            if "nsip" in result and len(result["nsip"]) > 0:
-                    logger.info(f"Successfully fetched {ip_type} {result['nsip'][0]['ipaddress']}")
-                    return result["nsip"][0]['ipaddress'], result["nsip"][0]['netmask']
-            logger.error(f"Could not fetch any {ip_type} of the node")
-            return "",""
-        except Exception as e:
-            logger.error(f"Could not fetch the ips on the node. Reason: {str(e)}")
-            return "",""
-        
-    def get_nsip(self):
-        logger.info(f"Trying to get the NSIP of the node")
-        try:
-            result = self.do_get(resource="nsip?filter=type:NSIP")
-            for ip_dict in result["nsip"]:
-                if ip_dict["type"] == "NSIP":
-                    logger.info(f"Successfully fetched NSIP {ip_dict['ipaddress']}")
-                    return ip_dict["ipaddress"]
-            logger.error(f"Could not fetch the NSIP of the node")
-            return False
-        except Exception as e:
-            logger.error(f"Could not fetch the NSIP of the node. Reason: {str(e)}")
-            return False
-
     def get_clip(self):
         logger.info(f"Trying to get the CLIP of the cluster from node {self.nsip}")
         try:
@@ -360,7 +305,7 @@ class CitrixADC(HTTPNitro):
             self.do_delete(resource="ipset_nsip_binding", id=binding_id)
             logger.info(f"Successfully unbound IP {ipaddr} from ipset 'ipset1'")
         except Exception as e:
-            logger.error(f"Failed to unbinf ip from ipset. Reason: {str(e)}")
+            logger.error(f"Failed to unbind ip from ipset. Reason: {str(e)}")
             
     def get_ipset_bindings(self):
         logger.info(f"Getting IPs bound to ipset 'ipset1")
@@ -525,16 +470,20 @@ class Cluster(CitrixADC):
                 self.unbind_ipset(vip['ipaddress'])
                 self.del_nsip(vip['ipaddress'])
 
-def get_mgmt_snip():
+def get_node_ips():
     metadata_url = "http://169.254.169.254/metadata/instance?api-version=2023-07-01"
     response = do_request(metadata_url, "GET", retries=20, headers={"Metadata":"true"})
-    return response["network"]["interface"][0]["ipv4"]["ipAddress"][1]["privateIpAddress"]
-
-    '''
-    response = requests.request("GET", url=metadata_url, headers={"Metadata":"true"}, timeout=(5,60))
-    r = response.json()
-    return r["network"]["interface"][0]["ipv4"]["ipAddress"][1]["privateIpAddress"]
-    '''
+    try:
+        nsip = response["network"]["interface"][0]["ipv4"]["ipAddress"][0]["privateIpAddress"]
+        mgmt_snip = response["network"]["interface"][0]["ipv4"]["ipAddress"][1]["privateIpAddress"]
+        mgmt_netmask = str(IPv4Network(f'0.0.0.0/{response["network"]["interface"][0]["ipv4"]["subnet"][0]["prefix"]}').netmask)
+        vip = response["network"]["interface"][1]["ipv4"]["ipAddress"][0]["privateIpAddress"]
+        vip_netmask = str(IPv4Network(f'0.0.0.0/{response["network"]["interface"][1]["ipv4"]["subnet"][0]["prefix"]}').netmask)
+        server_snip = response["network"]["interface"][2]["ipv4"]["ipAddress"][0]["privateIpAddress"]
+        server_netmask = str(IPv4Network(f'0.0.0.0/{response["network"]["interface"][2]["ipv4"]["subnet"][0]["prefix"]}').netmask)
+        return nsip, mgmt_snip, mgmt_netmask, vip, vip_netmask, server_snip, server_netmask
+    except Exception as e:
+        logger.error("Error fetching the interface configs of the node: {str(e)}")
 
 def main(clip, password):
     node = CitrixADC(nsip="localhost", nspass=password)
@@ -543,20 +492,14 @@ def main(clip, password):
     if cluster_ip and cluster_ip == clip:
         logger.info(f"Node is already part of cluster")
         return
-    nsip, vip, snip = "", "", ""
-    while not nsip or not vip or not snip:
-        nsip, mgmt_netmask = node.get_ip("NSIP")
-        vip, client_netmask = node.get_ip("VIP")
-        snip, server_netmask = node.get_ip("SNIP")
-        waitfor(2)
-    mgmt_snip = get_mgmt_snip()
+
+    nsip, mgmt_snip, mgmt_netmask, vip, vip_netmask, server_snip, server_netmask = get_node_ips()
     
-    cluster = Cluster(clip, password, nameserver="168.63.129.16", vip_netmask=client_netmask, mgmt_netmask=mgmt_netmask, server_netmask=server_netmask, backplane="0/1")
-    if not cluster.check_connection():
-        cluster.add_first_node(nsip, vip, mgmt_snip, snip)
+    cluster = Cluster(clip, password, nameserver="168.63.129.16", vip_netmask=vip_netmask, mgmt_netmask=mgmt_netmask, server_netmask=server_netmask, backplane="0/1")
+    if not cluster.check_connection(retries=5):
+        cluster.add_first_node(nsip, vip, mgmt_snip, server_snip)
     else:
-        cluster.add_node(nsip, vip, mgmt_snip, snip)
+        cluster.add_node(nsip, vip, mgmt_snip, server_snip)
 
 main("10.10.17.243", "Freebsd123$%^")    
-
 
