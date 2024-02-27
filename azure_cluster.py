@@ -501,5 +501,6 @@ def main(clip, password):
     else:
         cluster.add_node(nsip, vip, mgmt_snip, server_snip)
 
-main("10.10.17.243", "Freebsd123$%^")    
+if len(sys.argv) > 1:
+  main(sys.argv[1], "Freebsd123$%^")
 
