@@ -8,11 +8,14 @@ from ipaddress import IPv4Network, ip_network
 import traceback
 import copy
 
+from azure.identity import DefaultAzureCredential
+from azure.mgmt.compute import ComputeManagementClient
+
+
 logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
 
-handler = logging.StreamHandler(sys.stdout)
-handler = logging.FileHandler("/var/log/exp.log", mode="a")
+handler = logging.FileHandler("/var/log/clusterbootstrap.log", mode="a")
 
 handler.setLevel(logging.DEBUG)
 formatter = logging.Formatter('%(asctime)s - %(process)d - %(levelname)s - %(message)s')
@@ -143,20 +146,18 @@ class HTTPNitro:
         return self.do_request(resource=resource, method="DELETE", id=id, action=action, headers=self.headers)
 
     def wait_for_reachability(self, max_time=120):
-        logger.info(f"Waiting for {self.nsip} to be reachable")
-        attempts = int(max_time / 5)
+        logger.info(f"Waiting for {self.nsip} to be reachable. Max wait time = {max_time} seconds")
+        wait_till = time.time() + max_time
 
         url = self.construct_url(resource="login")
 
         headers = {}
         headers["Content-Type"] = "application/json"
         payload = {"login": {"username": self.nsuser, "password": self.nspass}}
-        for i in range(attempts):
+        while time.time() < wait_till:
             try:
                 logger.debug(f"request: URL={url}")
-                r = requests.post(url=url, headers=headers, json=payload, timeout=(5, 5))
-                logger.debug(f"response status:{r.status_code} text:{r.text}")
-                response = r.json()
+                response = do_request(url, 'POST', data=payload, retries=0, headers=headers) 
 
                 if (response["severity"] != "ERROR"
                     or "ForcePasswordChange is enabled" in response["message"]):
@@ -164,9 +165,11 @@ class HTTPNitro:
                     return
                 waitfor(5, "Waiting to make sure the packet engine is UP")
             except Exception as e:
-                logger.error(f"Node {self.nsip} is not yet reachable. Reason:{str(e)}")
+                logger.info(f"Node {self.nsip} is not yet reachable. Reason:{str(e)}")
+                waitfor(5, "Waiting before retrying connection")
+        logger.error(f"{self.nsip} is not reachable")
         raise ValueError(f"{self.nsip} is not reachable")
-        
+       
 class CitrixADC(HTTPNitro):
     def __init__(self, nsip, nsuser="nsroot", nspass="nsroot"):
         super().__init__(nsip=nsip, nsuser=nsuser, nspass=nspass)
@@ -470,9 +473,11 @@ class Cluster(CitrixADC):
                 self.unbind_ipset(vip['ipaddress'])
                 self.del_nsip(vip['ipaddress'])
 
-def get_node_ips():
+def get_node_metadata():
     metadata_url = "http://169.254.169.254/metadata/instance?api-version=2023-07-01"
-    response = do_request(metadata_url, "GET", retries=20, headers={"Metadata":"true"})
+    return do_request(metadata_url, "GET", retries=20, headers={"Metadata":"true"})
+    
+
     try:
         nsip = response["network"]["interface"][0]["ipv4"]["ipAddress"][0]["privateIpAddress"]
         mgmt_snip = response["network"]["interface"][0]["ipv4"]["ipAddress"][1]["privateIpAddress"]
@@ -485,6 +490,25 @@ def get_node_ips():
     except Exception as e:
         logger.error("Error fetching the interface configs of the node: {str(e)}")
 
+def vmss_node_count(subscription_id, resource_group, vmss_name):
+    client = ComputeManagementClient(
+        credential=DefaultAzureCredential(),
+        subscription_id=subscription_id
+    )
+
+    while True:
+        try:
+            response = client.virtual_machine_scale_sets.get(
+                resource_group_name=resource_group,
+                vm_scale_set_name=vmss_name
+            )
+            logger.info(f"Vmss node count = {response.sku.capacity}")
+            return response.sku.capacity
+        except Exception as e:
+            logger.error(f"Failed to get virtual_machine_scale_sets. Error: {str(e)}")
+            waitfor(seconds=5, reason="Waiting before trying to fetch vmss resource")
+
+
 def main(clip, password):
     node = CitrixADC(nsip="localhost", nspass=password)
     node.wait_for_reachability(max_time=180)
@@ -493,14 +517,29 @@ def main(clip, password):
         logger.info(f"Node is already part of cluster")
         return
 
-    nsip, mgmt_snip, mgmt_netmask, vip, vip_netmask, server_snip, server_netmask = get_node_ips()
+    metadata = get_node_metadata()
+    try:
+        subscription_id = metadata["compute"]["subscriptionId"]
+        vmss_name = metadata["compute"]["vmScaleSetName"]
+        resource_group = metadata["compute"]["resourceGroupName"]
+        nsip = metadata["network"]["interface"][0]["ipv4"]["ipAddress"][0]["privateIpAddress"]
+        mgmt_snip = metadata["network"]["interface"][0]["ipv4"]["ipAddress"][1]["privateIpAddress"]
+        mgmt_netmask = str(IPv4Network(f'0.0.0.0/{metadata["network"]["interface"][0]["ipv4"]["subnet"][0]["prefix"]}').netmask)
+        vip = metadata["network"]["interface"][1]["ipv4"]["ipAddress"][0]["privateIpAddress"]
+        vip_netmask = str(IPv4Network(f'0.0.0.0/{metadata["network"]["interface"][1]["ipv4"]["subnet"][0]["prefix"]}').netmask)
+        server_snip = metadata["network"]["interface"][2]["ipv4"]["ipAddress"][0]["privateIpAddress"]
+        server_netmask = str(IPv4Network(f'0.0.0.0/{metadata["network"]["interface"][2]["ipv4"]["subnet"][0]["prefix"]}').netmask)
+    except Exception as e:
+        logger.error("Error fetching required metadata of the node: {str(e)}")
+        raise
     
     cluster = Cluster(clip, password, nameserver="168.63.129.16", vip_netmask=vip_netmask, mgmt_netmask=mgmt_netmask, server_netmask=server_netmask, backplane="0/1")
-    if not cluster.check_connection(retries=5):
+    if vmss_node_count(subscription_id, resource_group, vmss_name) < 2 or (not cluster.check_connection(retries=5)):
         cluster.add_first_node(nsip, vip, mgmt_snip, server_snip)
     else:
         cluster.add_node(nsip, vip, mgmt_snip, server_snip)
 
 if len(sys.argv) > 1:
-  main(sys.argv[1], "Freebsd123$%^")
-
+    main(sys.argv[1], "Freebsd123$%^")
+else:
+    logger.error("Cluster IP address not passed as command line argument")
