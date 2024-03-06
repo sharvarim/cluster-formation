@@ -509,7 +509,7 @@ def vmss_node_count(subscription_id, resource_group, vmss_name):
             waitfor(seconds=5, reason="Waiting before trying to fetch vmss resource")
 
 
-def main(clip, password):
+def main(clip, server_network, password):
     node = CitrixADC(nsip="localhost", nspass=password)
     node.wait_for_reachability(max_time=180)
     cluster_ip = node.get_clip()
@@ -525,10 +525,15 @@ def main(clip, password):
         nsip = metadata["network"]["interface"][0]["ipv4"]["ipAddress"][0]["privateIpAddress"]
         mgmt_snip = metadata["network"]["interface"][0]["ipv4"]["ipAddress"][1]["privateIpAddress"]
         mgmt_netmask = str(IPv4Network(f'0.0.0.0/{metadata["network"]["interface"][0]["ipv4"]["subnet"][0]["prefix"]}').netmask)
-        vip = metadata["network"]["interface"][1]["ipv4"]["ipAddress"][0]["privateIpAddress"]
-        vip_netmask = str(IPv4Network(f'0.0.0.0/{metadata["network"]["interface"][1]["ipv4"]["subnet"][0]["prefix"]}').netmask)
-        server_snip = metadata["network"]["interface"][2]["ipv4"]["ipAddress"][0]["privateIpAddress"]
-        server_netmask = str(IPv4Network(f'0.0.0.0/{metadata["network"]["interface"][2]["ipv4"]["subnet"][0]["prefix"]}').netmask)
+        server_if_idx, client_if_idx = 2, 1
+        # the secondary interfaces in instance metadata need not be in the right order
+        # https://github.com/MicrosoftDocs/azure-docs/issues/7706
+        if metadata["network"]["interface"][1]["ipv4"]["subnet"][0]["address"] == server_network:
+            server_if_idx, client_if_idx = 1, 2
+        vip = metadata["network"]["interface"][client_if_idx]["ipv4"]["ipAddress"][0]["privateIpAddress"]
+        vip_netmask = str(IPv4Network(f'0.0.0.0/{metadata["network"]["interface"][client_if_idx]["ipv4"]["subnet"][0]["prefix"]}').netmask)
+        server_snip = metadata["network"]["interface"][server_if_idx]["ipv4"]["ipAddress"][0]["privateIpAddress"]
+        server_netmask = str(IPv4Network(f'0.0.0.0/{metadata["network"]["interface"][server_if_idx]["ipv4"]["subnet"][0]["prefix"]}').netmask)
     except Exception as e:
         logger.error("Error fetching required metadata of the node: {str(e)}")
         raise
@@ -539,7 +544,7 @@ def main(clip, password):
     else:
         cluster.add_node(nsip, vip, mgmt_snip, server_snip)
 
-if len(sys.argv) > 1:
-    main(sys.argv[1], "Freebsd123$%^")
+if len(sys.argv) > 2:
+    main(sys.argv[1], sys.argv[2], "Freebsd123$%^")
 else:
     logger.error("Cluster IP address not passed as command line argument")
