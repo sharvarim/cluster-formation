@@ -478,7 +478,7 @@ def get_node_metadata():
     metadata_url = "http://169.254.169.254/metadata/instance?api-version=2023-07-01"
     return do_request(metadata_url, "GET", retries=8, headers={"Metadata":"true"})
 
-def vmss_node_count(subscription_id, resource_group, vmss_name):
+def get_vmss_node_count(subscription_id, resource_group, vmss_name):
     client = ComputeManagementClient(
         credential=DefaultAzureCredential(),
         subscription_id=subscription_id
@@ -548,7 +548,7 @@ def main(clip, server_network):
         return
     
     cluster = Cluster(clip, password, nameserver="168.63.129.16", vip_netmask=vip_netmask, mgmt_netmask=mgmt_netmask, server_netmask=server_netmask, backplane="0/1")
-    if vmss_node_count(subscription_id, resource_group, vmss_name) < 2 or (not cluster.check_connection(retries=5)):
+    if get_vmss_node_count(subscription_id, resource_group, vmss_name) < 2 or (not cluster.check_connection(retries=5)):
         cluster.add_first_node(nsip, vip, mgmt_snip, server_snip)
     else:
         cluster.add_node(nsip, vip, mgmt_snip, server_snip)
