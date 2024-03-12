@@ -477,19 +477,6 @@ class Cluster(CitrixADC):
 def get_node_metadata():
     metadata_url = "http://169.254.169.254/metadata/instance?api-version=2023-07-01"
     return do_request(metadata_url, "GET", retries=8, headers={"Metadata":"true"})
-    
-
-    try:
-        nsip = response["network"]["interface"][0]["ipv4"]["ipAddress"][0]["privateIpAddress"]
-        mgmt_snip = response["network"]["interface"][0]["ipv4"]["ipAddress"][1]["privateIpAddress"]
-        mgmt_netmask = str(IPv4Network(f'0.0.0.0/{response["network"]["interface"][0]["ipv4"]["subnet"][0]["prefix"]}').netmask)
-        vip = response["network"]["interface"][1]["ipv4"]["ipAddress"][0]["privateIpAddress"]
-        vip_netmask = str(IPv4Network(f'0.0.0.0/{response["network"]["interface"][1]["ipv4"]["subnet"][0]["prefix"]}').netmask)
-        server_snip = response["network"]["interface"][2]["ipv4"]["ipAddress"][0]["privateIpAddress"]
-        server_netmask = str(IPv4Network(f'0.0.0.0/{response["network"]["interface"][2]["ipv4"]["subnet"][0]["prefix"]}').netmask)
-        return nsip, mgmt_snip, mgmt_netmask, vip, vip_netmask, server_snip, server_netmask
-    except Exception as e:
-        logger.error("Error fetching the interface configs of the node: {str(e)}")
 
 def vmss_node_count(subscription_id, resource_group, vmss_name):
     client = ComputeManagementClient(
