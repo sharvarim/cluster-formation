@@ -477,8 +477,21 @@ class Cluster(CitrixADC):
 def get_node_metadata():
     metadata_url = "http://169.254.169.254/metadata/instance?api-version=2023-07-01"
     return do_request(metadata_url, "GET", retries=8, headers={"Metadata":"true"})
+    
 
-def get_vmss_node_count(subscription_id, resource_group, vmss_name):
+    try:
+        nsip = response["network"]["interface"][0]["ipv4"]["ipAddress"][0]["privateIpAddress"]
+        mgmt_snip = response["network"]["interface"][0]["ipv4"]["ipAddress"][1]["privateIpAddress"]
+        mgmt_netmask = str(IPv4Network(f'0.0.0.0/{response["network"]["interface"][0]["ipv4"]["subnet"][0]["prefix"]}').netmask)
+        vip = response["network"]["interface"][1]["ipv4"]["ipAddress"][0]["privateIpAddress"]
+        vip_netmask = str(IPv4Network(f'0.0.0.0/{response["network"]["interface"][1]["ipv4"]["subnet"][0]["prefix"]}').netmask)
+        server_snip = response["network"]["interface"][2]["ipv4"]["ipAddress"][0]["privateIpAddress"]
+        server_netmask = str(IPv4Network(f'0.0.0.0/{response["network"]["interface"][2]["ipv4"]["subnet"][0]["prefix"]}').netmask)
+        return nsip, mgmt_snip, mgmt_netmask, vip, vip_netmask, server_snip, server_netmask
+    except Exception as e:
+        logger.error("Error fetching the interface configs of the node: {str(e)}")
+
+def vmss_node_count(subscription_id, resource_group, vmss_name):
     client = ComputeManagementClient(
         credential=DefaultAzureCredential(),
         subscription_id=subscription_id
@@ -497,7 +510,7 @@ def get_vmss_node_count(subscription_id, resource_group, vmss_name):
             waitfor(seconds=5, reason="Waiting before trying to fetch vmss resource")
 
 def get_vault_url(subscription_id, resource_group):
-    client = ResourceManagementClient(credential, subscription_id)
+    client = ResourceManagementClient(credential=DefaultAzureCredential(), subscription_id=subscription_id)
     while True:
         try:
             resource_list = client.resources.list_by_resource_group(resource_group)
@@ -513,7 +526,8 @@ def get_adc_password(subscription_id, resource_group):
     client = SecretClient(vault_url=get_vault_url(subscription_id, resource_group), 
         credential=DefaultAzureCredential(), subscription_id=subscription_id)
 
-    return client.get_secret("adc-nsroot-pwd")
+    retrieved_secret = client.get_secret("adc-nsroot-pwd")
+    return retrieved_secret.value
 
 
 def main(clip, server_network):
@@ -539,7 +553,7 @@ def main(clip, server_network):
         logger.error("Error fetching required metadata of the node: {str(e)}")
         raise
 		
-	adc_password = get_adc_password(subscription_id, resource_group)
+    adc_password = get_adc_password(subscription_id, resource_group)
     node = CitrixADC(nsip="localhost", nspass=adc_password)
     node.wait_for_reachability(max_time=180)
     cluster_ip = node.get_clip()
@@ -547,8 +561,8 @@ def main(clip, server_network):
         logger.info(f"Node is already part of cluster")
         return
     
-    cluster = Cluster(clip, password, nameserver="168.63.129.16", vip_netmask=vip_netmask, mgmt_netmask=mgmt_netmask, server_netmask=server_netmask, backplane="0/1")
-    if get_vmss_node_count(subscription_id, resource_group, vmss_name) < 2 or (not cluster.check_connection(retries=5)):
+    cluster = Cluster(clip, adc_password, nameserver="168.63.129.16", vip_netmask=vip_netmask, mgmt_netmask=mgmt_netmask, server_netmask=server_netmask, backplane="0/1")
+    if vmss_node_count(subscription_id, resource_group, vmss_name) < 2 or (not cluster.check_connection(retries=5)):
         cluster.add_first_node(nsip, vip, mgmt_snip, server_snip)
     else:
         cluster.add_node(nsip, vip, mgmt_snip, server_snip)
