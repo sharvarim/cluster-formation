@@ -10,7 +10,8 @@ import copy
 
 from azure.identity import DefaultAzureCredential
 from azure.mgmt.compute import ComputeManagementClient
-
+from azure.mgmt.resource import ResourceManagementClient
+from azure.keyvault.secrets import SecretClient
 
 logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
@@ -475,7 +476,7 @@ class Cluster(CitrixADC):
 
 def get_node_metadata():
     metadata_url = "http://169.254.169.254/metadata/instance?api-version=2023-07-01"
-    return do_request(metadata_url, "GET", retries=20, headers={"Metadata":"true"})
+    return do_request(metadata_url, "GET", retries=8, headers={"Metadata":"true"})
     
 
     try:
@@ -508,14 +509,27 @@ def vmss_node_count(subscription_id, resource_group, vmss_name):
             logger.error(f"Failed to get virtual_machine_scale_sets. Error: {str(e)}")
             waitfor(seconds=5, reason="Waiting before trying to fetch vmss resource")
 
+def get_vault_url(subscription_id, resource_group):
+    client = ResourceManagementClient(credential, subscription_id)
+    while True:
+        try:
+            resource_list = client.resources.list_by_resource_group(resource_group)
+            for resource in list(resource_list):
+                if resource.type == "Microsoft.KeyVault/vaults":
+                    logger.info(f"Found vault - {resource.name}")
+                    return f"https://{resource.name}.vault.azure.net/"
+        except Exception as e:
+            logger.error(f"Failed to fetch resources in resource group. Error: {str(e)}")
+        waitfor(seconds=5, reason="Waiting before listing resources in resource group")
 
-def main(clip, server_network, password):
-    node = CitrixADC(nsip="localhost", nspass=password)
-    node.wait_for_reachability(max_time=180)
-    cluster_ip = node.get_clip()
-    if cluster_ip and cluster_ip == clip:
-        logger.info(f"Node is already part of cluster")
-        return
+def get_adc_password(subscription_id, resource_group):
+    client = SecretClient(vault_url=get_vault_url(subscription_id, resource_group), 
+        credential=DefaultAzureCredential(), subscription_id=subscription_id)
+
+    return client.get_secret("adc-nsroot-pwd")
+
+
+def main(clip, server_network):
 
     metadata = get_node_metadata()
     try:
@@ -537,6 +551,14 @@ def main(clip, server_network, password):
     except Exception as e:
         logger.error("Error fetching required metadata of the node: {str(e)}")
         raise
+		
+	adc_password = get_adc_password(subscription_id, resource_group)
+    node = CitrixADC(nsip="localhost", nspass=adc_password)
+    node.wait_for_reachability(max_time=180)
+    cluster_ip = node.get_clip()
+    if cluster_ip and cluster_ip == clip:
+        logger.info(f"Node is already part of cluster")
+        return
     
     cluster = Cluster(clip, password, nameserver="168.63.129.16", vip_netmask=vip_netmask, mgmt_netmask=mgmt_netmask, server_netmask=server_netmask, backplane="0/1")
     if vmss_node_count(subscription_id, resource_group, vmss_name) < 2 or (not cluster.check_connection(retries=5)):
@@ -545,6 +567,6 @@ def main(clip, server_network, password):
         cluster.add_node(nsip, vip, mgmt_snip, server_snip)
 
 if len(sys.argv) > 2:
-    main(sys.argv[1], sys.argv[2], "Freebsd123$%^")
+    main(sys.argv[1], sys.argv[2])
 else:
     logger.error("Cluster IP address not passed as command line argument")
